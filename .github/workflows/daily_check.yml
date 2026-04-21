@@ -1,0 +1,58 @@
+name: daily_check
+
+on:
+  schedule:
+    # 毎日 JST 18:00 = UTC 09:00
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write  # screenshots/ を自動コミットするため
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Build HTML & screenshot
+        env:
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: |
+          python -c "from main import build_table, render_screenshot; build_table(); render_screenshot()"
+
+      - name: Commit screenshot
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add screenshots/latest.png
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update screenshot [skip ci]"
+            git push
+          fi
+
+      - name: Wait for raw URL to propagate
+        run: sleep 15
+
+      - name: Send to LINE
+        env:
+          LINE_CHANNEL_TOKEN: ${{ secrets.LINE_CHANNEL_TOKEN }}
+          LINE_TARGET_ID: ${{ secrets.LINE_TARGET_ID }}
+          IMAGE_PUBLIC_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/screenshots/latest.png
+        run: |
+          python -c "from main import send_line_image; send_line_image()"
