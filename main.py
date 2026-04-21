@@ -242,9 +242,10 @@ def build_table():
         values = row.get("values", []) or []
         name_cell = values[NAME_COL_INDEX] if NAME_COL_INDEX < len(values) else None
         date_cell = values[ci] if ci < len(values) else None
-        # 氏名が空の行はスキップ
-        if not name_cell or not (name_cell.get("formattedValue") or "").strip():
-            continue
+        # 「アクア」を含む行に到達したら、その行を含めず以降を打ち切る
+        name_text = (name_cell or {}).get("formattedValue", "") or ""
+        if "アクア" in name_text:
+            break
         rows.append((name_cell, date_cell))
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
