@@ -205,11 +205,17 @@ def send_line_image():
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         json={
             "to": to_id,
-            "messages": [{
-                "type": "image",
-                "originalContentUrl": image_url,
-                "previewImageUrl": image_url,
-            }],
+            "messages": [
+                {
+                    "type": "text",
+                    "text": "お疲れ様です。\n明日の店舗情報になります。\nご確認よろしくお願いいたします。",
+                },
+                {
+                    "type": "image",
+                    "originalContentUrl": image_url,
+                    "previewImageUrl": image_url,
+                },
+            ],
         },
         timeout=30,
     )
