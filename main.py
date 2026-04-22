@@ -54,7 +54,7 @@ REGIONS = {
         "spreadsheet_id_env": "SPREADSHEET_ID_KANSAI",
         "line_target_env": "LINE_TARGET_ID_KANSAI",
         "terminator": None,
-        "name_col_index": 0,
+        "name_col_index": 3,
         "trim_trailing_empty": True,
     },
     "kyushu": {
