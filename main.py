@@ -2,12 +2,18 @@
 Googleスプレッドシートから「D列(氏名)」と「翌日日付の列」を抽出し、
 書式(背景色・文字色)を維持したHTMLテーブルを生成 → Playwrightで画像化 → LINE送信。
 
+地域(kanto / kansai / kyushu)ごとにスプレッドシート・送信先を切り替える。
+
 必要な環境変数:
-  SPREADSHEET_ID     - スプレッドシートID
-  GOOGLE_API_KEY     - Google Cloud で発行した APIキー (Sheets API 有効化済み)
-  LINE_CHANNEL_TOKEN - LINE Messaging APIのチャネルアクセストークン
-  LINE_TARGET_ID     - 送信先のユーザー/グループ/ルームID
-  IMAGE_PUBLIC_URL   - 画像が公開されるURL (raw.githubusercontent.com 等)
+  SPREADSHEET_ID_KANTO   - 関東シートのスプレッドシートID
+  SPREADSHEET_ID_KANSAI  - 関西シートのスプレッドシートID
+  SPREADSHEET_ID_KYUSHU  - 九州シートのスプレッドシートID
+  GOOGLE_API_KEY         - Google Cloud で発行した APIキー (Sheets API 有効化済み)
+  LINE_CHANNEL_TOKEN     - LINE Messaging APIのチャネルアクセストークン (全地域共通)
+  LINE_TARGET_ID_KANTO   - 関東の送信先ID
+  LINE_TARGET_ID_KANSAI  - 関西の送信先ID
+  LINE_TARGET_ID_KYUSHU  - 九州の送信先ID
+  IMAGE_PUBLIC_URL_BASE  - screenshots/ ディレクトリの公開URL (末尾スラッシュ省略可)
 
 前提: スプレッドシートを「リンクを知っている全員 (閲覧者)」で共有しておく。
       APIキー方式では非公開シートは読めない。
@@ -18,6 +24,7 @@ import html
 import os
 import re
 import sys
+import traceback
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -26,11 +33,44 @@ from googleapiclient.discovery import build
 from playwright.sync_api import sync_playwright
 
 OUT_DIR = Path("screenshots")
-HTML_PATH = OUT_DIR / "latest.html"
-SCREENSHOT_PATH = OUT_DIR / "latest.png"
 
 NAME_COL_INDEX = 3       # D列 (0-based)
 HEADER_SCAN_ROWS = 3     # 日付ヘッダーを探す行数 (上から)
+
+# 地域ごとの設定。terminator は「その文字列を氏名に含む行に到達したら打ち切る」キー。
+# 不要なら None。
+REGIONS = {
+    "kanto": {
+        "label": "関東",
+        "spreadsheet_id_env": "SPREADSHEET_ID_KANTO",
+        "line_target_env": "LINE_TARGET_ID_KANTO",
+        "terminator": "アクア",
+    },
+    "kansai": {
+        "label": "関西",
+        "spreadsheet_id_env": "SPREADSHEET_ID_KANSAI",
+        "line_target_env": "LINE_TARGET_ID_KANSAI",
+        "terminator": None,
+    },
+    "kyushu": {
+        "label": "九州",
+        "spreadsheet_id_env": "SPREADSHEET_ID_KYUSHU",
+        "line_target_env": "LINE_TARGET_ID_KYUSHU",
+        "terminator": None,
+    },
+}
+
+
+class TargetDateNotFound(Exception):
+    """翌日の日付列がシート内に見つからなかった場合"""
+
+
+def html_path(region):
+    return OUT_DIR / f"latest_{region}.html"
+
+
+def screenshot_path(region):
+    return OUT_DIR / f"latest_{region}.png"
 
 
 # ------------------------- Sheets サービス -------------------------
@@ -181,7 +221,9 @@ def build_html(sheet_title, target_date, rows):
 
 # ------------------------- 画像化 & 送信 -------------------------
 
-def render_screenshot():
+def render_screenshot(region):
+    src = html_path(region).resolve().as_uri()
+    dst = screenshot_path(region)
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
         context = browser.new_context(
@@ -189,17 +231,20 @@ def render_screenshot():
             device_scale_factor=2,
         )
         page = context.new_page()
-        page.goto(HTML_PATH.resolve().as_uri())
+        page.goto(src)
         page.wait_for_load_state("networkidle")
-        page.locator("body").screenshot(path=str(SCREENSHOT_PATH))
+        page.locator("body").screenshot(path=str(dst))
         browser.close()
-    print(f"Saved: {SCREENSHOT_PATH}", file=sys.stderr)
+    print(f"[{region}] Saved: {dst}", file=sys.stderr)
 
 
-def send_line_image():
+def send_line_image(region):
+    config = REGIONS[region]
+    label = config["label"]
     token = os.environ["LINE_CHANNEL_TOKEN"]
-    to_id = os.environ["LINE_TARGET_ID"]
-    image_url = os.environ["IMAGE_PUBLIC_URL"]
+    to_id = os.environ[config["line_target_env"]]
+    base_url = os.environ["IMAGE_PUBLIC_URL_BASE"].rstrip("/")
+    image_url = f"{base_url}/latest_{region}.png"
     resp = requests.post(
         "https://api.line.me/v2/bot/message/push",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
@@ -208,7 +253,7 @@ def send_line_image():
             "messages": [
                 {
                     "type": "text",
-                    "text": "お疲れ様です。\n明日の店舗情報になります。\nご確認よろしくお願いいたします。",
+                    "text": f"お疲れ様です。\n明日の{label}の店舗情報になります。\nご確認よろしくお願いいたします。",
                 },
                 {
                     "type": "image",
@@ -220,23 +265,25 @@ def send_line_image():
         timeout=30,
     )
     resp.raise_for_status()
-    print("LINE push OK", file=sys.stderr)
+    print(f"[{region}] LINE push OK", file=sys.stderr)
 
 
 # ------------------------- メイン -------------------------
 
-def build_table():
-    """HTMLを生成してファイル保存。翌日列が見つからなければ非0で終了"""
+def build_table(region):
+    """HTMLを生成してファイル保存。翌日列が見つからなければ TargetDateNotFound を送出"""
+    config = REGIONS[region]
+    terminator = config["terminator"]
+
     service = build_sheets_service()
-    spreadsheet_id = os.environ["SPREADSHEET_ID"]
+    spreadsheet_id = os.environ[config["spreadsheet_id_env"]]
     target = tomorrow_jst()
 
     data = fetch_sheets(service, spreadsheet_id)
     sheets = data.get("sheets", [])
     found = find_target(sheets, target)
     if not found:
-        print(f"翌日 {target} を含む列が見つかりませんでした", file=sys.stderr)
-        sys.exit(1)
+        raise TargetDateNotFound(f"[{region}] 翌日 {target} を含む列が見つかりませんでした")
 
     si, header_ri, ci = found
     sheet = sheets[si]
@@ -248,18 +295,40 @@ def build_table():
         values = row.get("values", []) or []
         name_cell = values[NAME_COL_INDEX] if NAME_COL_INDEX < len(values) else None
         date_cell = values[ci] if ci < len(values) else None
-        # 「アクア」を含む行に到達したら、その行を含めず以降を打ち切る
         name_text = (name_cell or {}).get("formattedValue", "") or ""
-        if "アクア" in name_text:
+        if terminator and terminator in name_text:
             break
         rows.append((name_cell, date_cell))
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    HTML_PATH.write_text(build_html(title, target, rows), encoding="utf-8")
-    print(f"Sheet: {title} / col={ci} / rows={len(rows)}", file=sys.stderr)
+    html_path(region).write_text(build_html(title, target, rows), encoding="utf-8")
+    print(f"[{region}] Sheet: {title} / col={ci} / rows={len(rows)}", file=sys.stderr)
+
+
+def run_all(phase):
+    """全地域を順次実行。1地域が失敗しても他地域は継続し、最後に失敗があれば exit 1。
+
+    phase: 'build_render' -> build_table + render_screenshot
+           'send'         -> send_line_image
+    """
+    failed = []
+    for region in REGIONS:
+        try:
+            if phase == "build_render":
+                build_table(region)
+                render_screenshot(region)
+            elif phase == "send":
+                send_line_image(region)
+            else:
+                raise ValueError(f"unknown phase: {phase}")
+        except Exception:
+            traceback.print_exc()
+            failed.append(region)
+    if failed:
+        print(f"Failed regions ({phase}): {failed}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    build_table()
-    render_screenshot()
-    send_line_image()
+    run_all("build_render")
+    run_all("send")
