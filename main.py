@@ -34,29 +34,36 @@ from playwright.sync_api import sync_playwright
 
 OUT_DIR = Path("screenshots")
 
-NAME_COL_INDEX = 3       # D列 (0-based)
 HEADER_SCAN_ROWS = 3     # 日付ヘッダーを探す行数 (上から)
 
-# 地域ごとの設定。terminator は「その文字列を氏名に含む行に到達したら打ち切る」キー。
-# 不要なら None。
+# 地域ごとの設定。
+#   name_col_index        : 氏名列のインデックス (0-based)。A列=0, D列=3
+#   terminator            : 氏名にこの文字列を含む行で打ち切る。不要なら None
+#   trim_trailing_empty   : True の場合、末尾の空行(氏名も日付も空)を削除
 REGIONS = {
     "kanto": {
         "label": "関東",
         "spreadsheet_id_env": "SPREADSHEET_ID_KANTO",
         "line_target_env": "LINE_TARGET_ID_KANTO",
         "terminator": "アクア",
+        "name_col_index": 3,
+        "trim_trailing_empty": False,
     },
     "kansai": {
         "label": "関西",
         "spreadsheet_id_env": "SPREADSHEET_ID_KANSAI",
         "line_target_env": "LINE_TARGET_ID_KANSAI",
         "terminator": None,
+        "name_col_index": 0,
+        "trim_trailing_empty": True,
     },
     "kyushu": {
         "label": "九州",
         "spreadsheet_id_env": "SPREADSHEET_ID_KYUSHU",
         "line_target_env": "LINE_TARGET_ID_KYUSHU",
         "terminator": None,
+        "name_col_index": 0,
+        "trim_trailing_empty": True,
     },
 }
 
@@ -196,12 +203,14 @@ def build_html(sheet_title, target_date, rows):
         "<html lang='ja'><head><meta charset='utf-8'>",
         "<style>",
         "body{font-family:'Yu Gothic','Hiragino Sans','Noto Sans JP',sans-serif;",
-        "     margin:24px;background:#fff;color:#222;}",
+        "     margin:0;background:#fff;color:#222;}",
+        ".container{display:inline-block;padding:16px;}",
         "h2{margin:0 0 14px 0;font-size:20px;}",
         "table{border-collapse:collapse;font-size:15px;box-shadow:0 1px 3px rgba(0,0,0,.1);}",
         "th,td{border:1px solid #888;padding:10px 16px;text-align:center;min-width:90px;}",
         "th{background:#f5f5f5;font-weight:bold;}",
         "</style></head><body>",
+        "<div class='container'>",
         f"<h2>{html.escape(sheet_title)} — {header_date} のシフト</h2>",
         "<table>",
         f"<tr><th>氏名</th><th>{header_date}</th></tr>",
@@ -215,7 +224,7 @@ def build_html(sheet_title, target_date, rows):
             f"<td style='{cell_style(date_cell)}'>{html.escape(date_text)}</td>"
             "</tr>"
         )
-    lines.append("</table></body></html>")
+    lines.append("</table></div></body></html>")
     return "\n".join(lines)
 
 
@@ -233,7 +242,7 @@ def render_screenshot(region):
         page = context.new_page()
         page.goto(src)
         page.wait_for_load_state("networkidle")
-        page.locator("body").screenshot(path=str(dst))
+        page.locator(".container").screenshot(path=str(dst))
         browser.close()
     print(f"[{region}] Saved: {dst}", file=sys.stderr)
 
@@ -270,10 +279,18 @@ def send_line_image(region):
 
 # ------------------------- メイン -------------------------
 
+def _row_is_empty(row):
+    name_cell, date_cell = row
+    name_text = (name_cell or {}).get("formattedValue", "") or ""
+    date_text = (date_cell or {}).get("formattedValue", "") or ""
+    return not name_text.strip() and not date_text.strip()
+
+
 def build_table(region):
     """HTMLを生成してファイル保存。翌日列が見つからなければ TargetDateNotFound を送出"""
     config = REGIONS[region]
     terminator = config["terminator"]
+    name_col_index = config["name_col_index"]
 
     service = build_sheets_service()
     spreadsheet_id = os.environ[config["spreadsheet_id_env"]]
@@ -293,12 +310,16 @@ def build_table(region):
     rows = []
     for row in row_data[header_ri + 1:]:
         values = row.get("values", []) or []
-        name_cell = values[NAME_COL_INDEX] if NAME_COL_INDEX < len(values) else None
+        name_cell = values[name_col_index] if name_col_index < len(values) else None
         date_cell = values[ci] if ci < len(values) else None
         name_text = (name_cell or {}).get("formattedValue", "") or ""
         if terminator and terminator in name_text:
             break
         rows.append((name_cell, date_cell))
+
+    if config["trim_trailing_empty"]:
+        while rows and _row_is_empty(rows[-1]):
+            rows.pop()
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     html_path(region).write_text(build_html(title, target, rows), encoding="utf-8")
