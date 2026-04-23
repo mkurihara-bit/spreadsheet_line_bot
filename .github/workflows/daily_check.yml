@@ -1,9 +1,8 @@
 name: daily_check
 
 on:
-  schedule:
-    # 毎日 JST 17:50 = UTC 08:50 (GitHub Actionsの遅延を見込んで10分前倒し)
-    - cron: "50 8 * * *"
+  # 発火は外部スケジューラ(GAS時間トリガー)から workflow_dispatch で行う
+  # GitHub Actions の schedule は遅延が大きいため使用しない
   workflow_dispatch:
 
 permissions:
