@@ -108,8 +108,8 @@ def build_sheets_service():
 # ------------------------- 日付ユーティリティ -------------------------
 
 def tomorrow_jst():
-    now = datetime.datetime.now(ZoneInfo("Asia/Tokyo"))
-    return (now + datetime.timedelta(days=1)).date()
+    # TODO: 検証後に戻す
+    return datetime.date(2026, 4, 26)
 
 
 def serial_to_date(serial):
@@ -322,19 +322,29 @@ def _row_is_empty(row):
 
 
 def _cell_is_off(date_cell):
-    """シフト値が休みマーカーと一致するかを判定 (空白は休みとみなさない)"""
+    """シフト値が休みマーカー or 空白なら休みと判定"""
     if not date_cell:
-        return False
+        return True
     text = (date_cell.get("formattedValue") or "").strip()
+    if not text:
+        return True
     return text in OFF_MARKERS
 
 
+def _looks_like_member(name_cell):
+    """氏名欄が実メンバー(役職カッコ付き)かを判定。見出し/注記行を除外する"""
+    name = (name_cell or {}).get("formattedValue", "") or ""
+    if not name.strip():
+        return False
+    return ("(" in name) or ("（" in name)
+
+
 def _all_members_off(rows):
-    """氏名が入っている行について、全員のシフトが休みマーカーかを判定"""
+    """実メンバー行について、全員のシフトが休みマーカー or 空白かを判定"""
     member_rows = [
         (name_cell, date_cell)
         for name_cell, date_cell in rows
-        if (name_cell or {}).get("formattedValue", "").strip()
+        if _looks_like_member(name_cell)
     ]
     if not member_rows:
         return False
