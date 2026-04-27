@@ -108,8 +108,8 @@ def build_sheets_service():
 # ------------------------- 日付ユーティリティ -------------------------
 
 def tomorrow_jst():
-    # TODO: 検証後に戻す
-    return datetime.date(2026, 4, 26)
+    now = datetime.datetime.now(ZoneInfo("Asia/Tokyo"))
+    return (now + datetime.timedelta(days=1)).date()
 
 
 def serial_to_date(serial):
