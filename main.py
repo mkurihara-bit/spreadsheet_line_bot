@@ -88,6 +88,10 @@ def status_path(region):
     return OUT_DIR / f"status_{region}.json"
 
 
+def succeeded_path():
+    return OUT_DIR / "_succeeded.json"
+
+
 def read_status(region):
     path = status_path(region)
     if not path.exists():
@@ -404,10 +408,28 @@ def run_all(phase):
     """全地域を順次実行。1地域が失敗しても他地域は継続し、最後に失敗があれば exit 1。
 
     phase: 'build_render' -> build_table + render_screenshot
+                            成功地域を _succeeded.json に記録
            'send'         -> send_line_image
+                            _succeeded.json にある地域だけ送信（古い画像の誤送信防止）
     """
+    if phase == "send":
+        sp = succeeded_path()
+        if sp.exists():
+            try:
+                allowed = set(json.loads(sp.read_text(encoding="utf-8")))
+            except (json.JSONDecodeError, OSError):
+                allowed = set(REGIONS.keys())
+        else:
+            allowed = set(REGIONS.keys())
+    else:
+        allowed = set(REGIONS.keys())
+
     failed = []
+    succeeded = []
     for region in REGIONS:
+        if phase == "send" and region not in allowed:
+            print(f"[{region}] skip send (build_render failed in this run)", file=sys.stderr)
+            continue
         try:
             if phase == "build_render":
                 build_table(region)
@@ -416,9 +438,15 @@ def run_all(phase):
                 send_line_image(region)
             else:
                 raise ValueError(f"unknown phase: {phase}")
+            succeeded.append(region)
         except Exception:
             traceback.print_exc()
             failed.append(region)
+
+    if phase == "build_render":
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        succeeded_path().write_text(json.dumps(succeeded), encoding="utf-8")
+
     if failed:
         print(f"Failed regions ({phase}): {failed}", file=sys.stderr)
         sys.exit(1)

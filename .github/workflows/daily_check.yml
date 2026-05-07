@@ -29,6 +29,8 @@ jobs:
           python -m playwright install --with-deps chromium
 
       - name: Build HTML & screenshot (all regions)
+        id: build
+        continue-on-error: true
         env:
           SPREADSHEET_ID_KANTO:  ${{ secrets.SPREADSHEET_ID_KANTO }}
           SPREADSHEET_ID_KANSAI: ${{ secrets.SPREADSHEET_ID_KANSAI }}
@@ -44,7 +46,11 @@ jobs:
           git add screenshots/
           if ! git diff --cached --quiet; then
             git commit -m "chore: update screenshots [skip ci]"
-            git push
+            for i in 1 2 3; do
+              git pull --rebase origin "${GITHUB_REF_NAME}" && git push && break
+              echo "push retry $i"
+              sleep 5
+            done
           fi
 
       - name: Wait for raw URL to propagate
@@ -59,3 +65,9 @@ jobs:
           IMAGE_PUBLIC_URL_BASE: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/screenshots
         run: |
           python -c "from main import run_all; run_all('send')"
+
+      - name: Fail job if build had errors
+        if: steps.build.outcome == 'failure'
+        run: |
+          echo "::error::build_render had failures (see Build step). Failing the job for visibility."
+          exit 1
