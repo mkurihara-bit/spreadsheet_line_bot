@@ -40,9 +40,12 @@ HEADER_SCAN_ROWS = 3     # 日付ヘッダーを探す行数 (上から)
 # 氏名欄がこれらの値の場合「休み」と判定する (大文字小文字はそのまま比較)
 OFF_MARKERS = {"休", "休み", "×", "x", "X", "OFF", "off"}
 
+# 氏名セルの判定パターン。(店長)/(CL候補)/(キャッチ) を含むセルを氏名として扱う。
+# 全角(）半角() の両方に対応。
+ROLE_PATTERN = re.compile(r"[（(](店長|CL候補|キャッチ)[）)]")
+
 # 地域ごとの設定。
-#   name_col_index        : 氏名列のインデックス (0-based)。A列=0, D列=3
-#   terminator            : 氏名にこの文字列を含む行で打ち切る。不要なら None
+#   terminator            : 氏名セルにこの文字列を含む行で打ち切る。不要なら None
 #   trim_trailing_empty   : True の場合、末尾の空行(氏名も日付も空)を削除
 REGIONS = {
     "kanto": {
@@ -50,7 +53,6 @@ REGIONS = {
         "spreadsheet_id_env": "SPREADSHEET_ID_KANTO",
         "line_target_env": "LINE_TARGET_ID_KANTO",
         "terminator": "アクア",
-        "name_col_index": 3,
         "trim_trailing_empty": False,
     },
     "kansai": {
@@ -58,7 +60,6 @@ REGIONS = {
         "spreadsheet_id_env": "SPREADSHEET_ID_KANSAI",
         "line_target_env": "LINE_TARGET_ID_KANSAI",
         "terminator": None,
-        "name_col_index": 3,
         "trim_trailing_empty": True,
     },
     "kyushu": {
@@ -66,7 +67,6 @@ REGIONS = {
         "spreadsheet_id_env": "SPREADSHEET_ID_KYUSHU",
         "line_target_env": "LINE_TARGET_ID_KYUSHU",
         "terminator": None,
-        "name_col_index": 0,
         "trim_trailing_empty": True,
     },
 }
@@ -260,9 +260,10 @@ def render_screenshot(region):
     dst = screenshot_path(region)
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        # device_scale_factor=1: LINE preview の 1MB 上限を超えないようサイズ抑制
         context = browser.new_context(
             viewport={"width": 1200, "height": 800},
-            device_scale_factor=2,
+            device_scale_factor=1,
         )
         page = context.new_page()
         page.goto(src)
@@ -335,31 +336,28 @@ def _cell_is_off(date_cell):
     return text in OFF_MARKERS
 
 
-def _looks_like_member(name_cell):
-    """氏名欄が実メンバー(役職カッコ付き)かを判定。見出し/注記行を除外する"""
-    name = (name_cell or {}).get("formattedValue", "") or ""
-    if not name.strip():
-        return False
-    return ("(" in name) or ("（" in name)
+def find_name_cell_in_row(values, exclude_col):
+    """行内で (店長)/(CL候補)/(キャッチ) を含む最初のセルを返す。なければ None"""
+    for i, cell in enumerate(values):
+        if i == exclude_col:
+            continue
+        text = (cell or {}).get("formattedValue", "") or ""
+        if ROLE_PATTERN.search(text):
+            return cell
+    return None
 
 
 def _all_members_off(rows):
-    """実メンバー行について、全員のシフトが休みマーカー or 空白かを判定"""
-    member_rows = [
-        (name_cell, date_cell)
-        for name_cell, date_cell in rows
-        if _looks_like_member(name_cell)
-    ]
-    if not member_rows:
+    """全員のシフトが休みマーカー or 空白かを判定 (rows は既にメンバー行のみ)"""
+    if not rows:
         return False
-    return all(_cell_is_off(date_cell) for _, date_cell in member_rows)
+    return all(_cell_is_off(date_cell) for _, date_cell in rows)
 
 
 def build_table(region):
     """HTMLを生成してファイル保存。翌日列が見つからなければ TargetDateNotFound を送出"""
     config = REGIONS[region]
     terminator = config["terminator"]
-    name_col_index = config["name_col_index"]
 
     service = build_sheets_service()
     spreadsheet_id = os.environ[config["spreadsheet_id_env"]]
@@ -379,11 +377,13 @@ def build_table(region):
     rows = []
     for row in row_data[header_ri + 1:]:
         values = row.get("values", []) or []
-        name_cell = values[name_col_index] if name_col_index < len(values) else None
-        date_cell = values[ci] if ci < len(values) else None
+        name_cell = find_name_cell_in_row(values, exclude_col=ci)
+        if name_cell is None:
+            continue
         name_text = (name_cell or {}).get("formattedValue", "") or ""
         if terminator and terminator in name_text:
             break
+        date_cell = values[ci] if ci < len(values) else None
         rows.append((name_cell, date_cell))
 
     if config["trim_trailing_empty"]:
