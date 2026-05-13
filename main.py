@@ -337,12 +337,17 @@ def _cell_is_off(date_cell):
 
 
 def find_name_cell_in_row(values, exclude_col):
-    """行内で (店長)/(CL候補)/(キャッチ) を含む最初のセルを返す。なければ None"""
+    """行内で『氏名(店長)/(CL候補)/(キャッチ)』のセルを返す。
+    役職ラベルだけのセル「(店長)」「(キャッチ)」(役職ヘッダー)は除外する。"""
     for i, cell in enumerate(values):
         if i == exclude_col:
             continue
         text = (cell or {}).get("formattedValue", "") or ""
-        if ROLE_PATTERN.search(text):
+        m = ROLE_PATTERN.search(text)
+        if m is None:
+            continue
+        # 役職ラベル前に氏名(非空白文字)がある場合のみ氏名セルとして採用
+        if text[:m.start()].strip():
             return cell
     return None
 
