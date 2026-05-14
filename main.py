@@ -352,6 +352,20 @@ def find_name_cell_in_row(values, exclude_col):
     return None
 
 
+def is_role_header_row(values, exclude_col):
+    """行内に『(店長)』『(キャッチ)』など氏名なしの役職ラベル単体セルがあるか判定"""
+    for i, cell in enumerate(values):
+        if i == exclude_col:
+            continue
+        text = (cell or {}).get("formattedValue", "") or ""
+        m = ROLE_PATTERN.search(text)
+        if m is None:
+            continue
+        if not text[:m.start()].strip():
+            return True
+    return False
+
+
 def _all_members_off(rows):
     """全員のシフトが休みマーカー or 空白かを判定 (rows は既にメンバー行のみ)"""
     if not rows:
@@ -380,16 +394,27 @@ def build_table(region):
     row_data = sheet["data"][0].get("rowData", [])
 
     rows = []
+    member_started = False  # 最初の氏名行を見つけたら True (それ以前のメモ書きは無視)
     for row in row_data[header_ri + 1:]:
         values = row.get("values", []) or []
-        name_cell = find_name_cell_in_row(values, exclude_col=ci)
-        if name_cell is None:
-            continue
-        name_text = (name_cell or {}).get("formattedValue", "") or ""
-        if terminator and terminator in name_text:
-            break
         date_cell = values[ci] if ci < len(values) else None
-        rows.append((name_cell, date_cell))
+        name_cell = find_name_cell_in_row(values, exclude_col=ci)
+
+        if name_cell is not None:
+            name_text = name_cell.get("formattedValue", "") or ""
+            if terminator and terminator in name_text:
+                break
+            rows.append((name_cell, date_cell))
+            member_started = True
+            continue
+
+        # 役職ヘッダー単体行(『(店長)』『(キャッチ)』のみ)は除外
+        if is_role_header_row(values, exclude_col=ci):
+            continue
+
+        # 氏名行以降の住所/メモ書き行は氏名セル空で含める
+        if member_started:
+            rows.append((None, date_cell))
 
     if config["trim_trailing_empty"]:
         while rows and _row_is_empty(rows[-1]):
