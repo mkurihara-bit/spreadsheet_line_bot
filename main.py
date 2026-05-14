@@ -412,9 +412,11 @@ def build_table(region):
         if is_role_header_row(values, exclude_col=ci):
             continue
 
-        # 氏名行以降の住所/メモ書き行は氏名セル空で含める
+        # 氏名行以降の住所/メモ書き行は氏名セル空で含める(日付セルが空の行は除外)
         if member_started:
-            rows.append((None, date_cell))
+            date_text = (date_cell or {}).get("formattedValue", "") or ""
+            if date_text.strip():
+                rows.append((None, date_cell))
 
     if config["trim_trailing_empty"]:
         while rows and _row_is_empty(rows[-1]):
