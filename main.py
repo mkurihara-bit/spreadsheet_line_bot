@@ -172,9 +172,17 @@ def fetch_sheets(service, spreadsheet_id):
     ).execute()
 
 
-def find_target(sheets, target_date):
-    """翌日日付を含む (sheet_index, header_row_index, col_index) を返す"""
+def find_target(sheets, target_date, skip_title_substr=None):
+    """翌日日付を含む (sheet_index, header_row_index, col_index) を返す。
+
+    skip_title_substr: タブ名にこの文字列を含むシートは走査対象から除外する。
+        関東の「アクア」タブのように、同一スプレッドシート内の別チーム用タブを
+        誤って拾わないために使う。
+    """
     for si, sheet in enumerate(sheets):
+        title = sheet.get("properties", {}).get("title", "") or ""
+        if skip_title_substr and skip_title_substr in title:
+            continue
         data_arr = sheet.get("data") or []
         if not data_arr:
             continue
@@ -384,7 +392,7 @@ def build_table(region):
 
     data = fetch_sheets(service, spreadsheet_id)
     sheets = data.get("sheets", [])
-    found = find_target(sheets, target)
+    found = find_target(sheets, target, skip_title_substr=terminator)
     if not found:
         raise TargetDateNotFound(f"[{region}] 翌日 {target} を含む列が見つかりませんでした")
 
