@@ -1,24 +1,25 @@
 """
 Googleスプレッドシートから「D列(氏名)」と「翌日日付の列」を抽出し、
-書式(背景色・文字色)を維持したHTMLテーブルを生成 → Playwrightで画像化 → LINE送信。
+書式(背景色・文字色)を維持したHTMLテーブルを生成 → Playwrightで画像化
+→ GASウェブアプリ経由で共有ドライブに保存。
 
-地域(kanto / kansai / kyushu)ごとにスプレッドシート・送信先を切り替える。
+地域(kanto / kansai / kyushu)ごとにスプレッドシートを切り替え、
+画像はそれぞれ「YYYY-MM-DD_地域名.png」という名前で保存される。
+保存後の配信(LINE等)は人が手動で行う想定。
 
 必要な環境変数:
   SPREADSHEET_ID_KANTO   - 関東シートのスプレッドシートID
   SPREADSHEET_ID_KANSAI  - 関西シートのスプレッドシートID
   SPREADSHEET_ID_KYUSHU  - 九州シートのスプレッドシートID
   GOOGLE_API_KEY         - Google Cloud で発行した APIキー (Sheets API 有効化済み)
-  LINE_CHANNEL_TOKEN     - LINE Messaging APIのチャネルアクセストークン (全地域共通)
-  LINE_TARGET_ID_KANTO   - 関東の送信先ID
-  LINE_TARGET_ID_KANSAI  - 関西の送信先ID
-  LINE_TARGET_ID_KYUSHU  - 九州の送信先ID
-  IMAGE_PUBLIC_URL_BASE  - screenshots/ ディレクトリの公開URL (末尾スラッシュ省略可)
+  GAS_WEBAPP_URL         - 画像保存用 GAS ウェブアプリの /exec URL
+  GAS_TOKEN              - GAS と一致させる合言葉トークン
 
 前提: スプレッドシートを「リンクを知っている全員 (閲覧者)」で共有しておく。
       APIキー方式では非公開シートは読めない。
 """
 
+import base64
 import datetime
 import html
 import json
@@ -51,21 +52,18 @@ REGIONS = {
     "kanto": {
         "label": "関東",
         "spreadsheet_id_env": "SPREADSHEET_ID_KANTO",
-        "line_target_env": "LINE_TARGET_ID_KANTO",
         "terminator": "アクア",
         "trim_trailing_empty": False,
     },
     "kansai": {
         "label": "関西",
         "spreadsheet_id_env": "SPREADSHEET_ID_KANSAI",
-        "line_target_env": "LINE_TARGET_ID_KANSAI",
         "terminator": None,
         "trim_trailing_empty": True,
     },
     "kyushu": {
         "label": "九州",
         "spreadsheet_id_env": "SPREADSHEET_ID_KYUSHU",
-        "line_target_env": "LINE_TARGET_ID_KYUSHU",
         "terminator": None,
         "trim_trailing_empty": True,
     },
@@ -86,10 +84,6 @@ def screenshot_path(region):
 
 def status_path(region):
     return OUT_DIR / f"status_{region}.json"
-
-
-def succeeded_path():
-    return OUT_DIR / "_succeeded.json"
 
 
 def read_status(region):
@@ -258,17 +252,14 @@ def build_html(sheet_title, target_date, rows):
     return "\n".join(lines)
 
 
-# ------------------------- 画像化 & 送信 -------------------------
+# ------------------------- 画像化 & アップロード -------------------------
 
 def render_screenshot(region):
-    if read_status(region).get("all_off"):
-        print(f"[{region}] 全員休みのためスクリーンショット生成をスキップ", file=sys.stderr)
-        return
     src = html_path(region).resolve().as_uri()
     dst = screenshot_path(region)
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-        # device_scale_factor=1: LINE preview の 1MB 上限を超えないようサイズ抑制
+        # device_scale_factor=1: 画像ファイルサイズを抑制
         context = browser.new_context(
             viewport={"width": 1200, "height": 800},
             device_scale_factor=1,
@@ -281,48 +272,47 @@ def render_screenshot(region):
     print(f"[{region}] Saved: {dst}", file=sys.stderr)
 
 
-def send_line_image(region):
-    config = REGIONS[region]
-    label = config["label"]
-    token = os.environ["LINE_CHANNEL_TOKEN"]
-    to_id = os.environ[config["line_target_env"]]
-    all_off = read_status(region).get("all_off", False)
+def upload_to_gas():
+    """生成済みの画像を GAS ウェブアプリへ送信し、共有ドライブに保存する。
 
-    if all_off:
-        messages = [
-            {
-                "type": "text",
-                "text": (
-                    f"お疲れ様です。\n"
-                    f"明日の{label}は全員休みのため、シフト表の配信を省略します。"
-                ),
-            }
-        ]
-        mode = "全員休み通知"
-    else:
-        base_url = os.environ["IMAGE_PUBLIC_URL_BASE"].rstrip("/")
-        image_url = f"{base_url}/latest_{region}.png"
-        messages = [
-            {
-                "type": "text",
-                "text": f"お疲れ様です。\n明日の{label}の店舗情報になります。\nご確認よろしくお願いいたします。",
-            },
-            {
-                "type": "image",
-                "originalContentUrl": image_url,
-                "previewImageUrl": image_url,
-            },
-        ]
-        mode = "画像配信"
+    stale(古い)画像を誤って送らないよう、status の target_date が「明日」と
+    一致する地域だけを送信対象にする。生成に失敗した地域は前回の画像が
+    残っていても target_date が古いままなので自動的に除外される。
+    """
+    url = os.environ["GAS_WEBAPP_URL"]
+    token = os.environ["GAS_TOKEN"]
+    target = tomorrow_jst()
+
+    images = []
+    for region, config in REGIONS.items():
+        status = read_status(region)
+        if status.get("target_date") != target.isoformat():
+            print(f"[{region}] 今回未更新のため送信対象外", file=sys.stderr)
+            continue
+        path = screenshot_path(region)
+        if not path.exists():
+            print(f"[{region}] 画像が無いため送信スキップ", file=sys.stderr)
+            continue
+        data = base64.b64encode(path.read_bytes()).decode("ascii")
+        name = f"{target.isoformat()}_{config['label']}.png"  # 例: 2026-06-19_関東.png
+        images.append({"name": name, "data": data})
+
+    if not images:
+        raise RuntimeError("送信できる画像がありません(全地域が生成失敗の可能性)")
 
     resp = requests.post(
-        "https://api.line.me/v2/bot/message/push",
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        json={"to": to_id, "messages": messages},
-        timeout=30,
+        url,
+        json={"token": token, "images": images},
+        timeout=120,
     )
     resp.raise_for_status()
-    print(f"[{region}] LINE push OK ({mode})", file=sys.stderr)
+    result = resp.json()
+    if not result.get("ok"):
+        raise RuntimeError(f"GAS がエラーを返しました: {result}")
+    print(
+        f"GAS upload OK: saved={result.get('saved')} deleted={result.get('deleted')}",
+        file=sys.stderr,
+    )
 
 
 # ------------------------- メイン -------------------------
@@ -444,54 +434,23 @@ def build_table(region):
     )
 
 
-def run_all(phase):
-    """全地域を順次実行。1地域が失敗しても他地域は継続し、最後に失敗があれば exit 1。
-
-    phase: 'build_render' -> build_table + render_screenshot
-                            成功地域を _succeeded.json に記録
-           'send'         -> send_line_image
-                            _succeeded.json にある地域だけ送信（古い画像の誤送信防止）
-    """
-    if phase == "send":
-        sp = succeeded_path()
-        if sp.exists():
-            try:
-                allowed = set(json.loads(sp.read_text(encoding="utf-8")))
-            except (json.JSONDecodeError, OSError):
-                allowed = set(REGIONS.keys())
-        else:
-            allowed = set(REGIONS.keys())
-    else:
-        allowed = set(REGIONS.keys())
-
+def build_all():
+    """全地域の画像を生成。1地域が失敗しても他は継続し、失敗地域のリストを返す。"""
     failed = []
-    succeeded = []
     for region in REGIONS:
-        if phase == "send" and region not in allowed:
-            print(f"[{region}] skip send (build_render failed in this run)", file=sys.stderr)
-            continue
         try:
-            if phase == "build_render":
-                build_table(region)
-                render_screenshot(region)
-            elif phase == "send":
-                send_line_image(region)
-            else:
-                raise ValueError(f"unknown phase: {phase}")
-            succeeded.append(region)
+            build_table(region)
+            render_screenshot(region)
         except Exception:
             traceback.print_exc()
             failed.append(region)
-
-    if phase == "build_render":
-        OUT_DIR.mkdir(parents=True, exist_ok=True)
-        succeeded_path().write_text(json.dumps(succeeded), encoding="utf-8")
-
-    if failed:
-        print(f"Failed regions ({phase}): {failed}", file=sys.stderr)
-        sys.exit(1)
+    return failed
 
 
 if __name__ == "__main__":
-    run_all("build_render")
-    run_all("send")
+    failed = build_all()
+    # 生成できた地域の画像を共有ドライブへ保存（古い画像は送らない仕組み）
+    upload_to_gas()
+    if failed:
+        print(f"Failed regions: {failed}", file=sys.stderr)
+        sys.exit(1)
