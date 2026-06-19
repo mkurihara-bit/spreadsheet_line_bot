@@ -30,6 +30,7 @@ import traceback
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import httplib2
 import requests
 from googleapiclient.discovery import build
 from playwright.sync_api import sync_playwright
@@ -100,7 +101,10 @@ def read_status(region):
 
 def build_sheets_service():
     api_key = os.environ["GOOGLE_API_KEY"]
-    return build("sheets", "v4", developerKey=api_key, cache_discovery=False)
+    # 関東のような大きいシートは読み込みに50秒以上かかり、既定(約60秒)を
+    # 超えてタイムアウトすることがあるため、余裕をもって120秒に延長する。
+    http = httplib2.Http(timeout=120)
+    return build("sheets", "v4", developerKey=api_key, http=http, cache_discovery=False)
 
 
 # ------------------------- 日付ユーティリティ -------------------------
@@ -435,16 +439,29 @@ def build_table(region):
     )
 
 
+MAX_BUILD_ATTEMPTS = 2  # 一時的なタイムアウト対策として各地域を最大この回数まで試行
+
+
 def build_all():
-    """全地域の画像を生成。1地域が失敗しても他は継続し、失敗地域のリストを返す。"""
+    """全地域の画像を生成。1地域が失敗しても他は継続し、失敗地域のリストを返す。
+
+    一時的なネットワークタイムアウトに備え、地域ごとに最大 MAX_BUILD_ATTEMPTS 回試行する。
+    """
     failed = []
     for region in REGIONS:
-        try:
-            build_table(region)
-            render_screenshot(region)
-        except Exception:
-            traceback.print_exc()
-            failed.append(region)
+        for attempt in range(1, MAX_BUILD_ATTEMPTS + 1):
+            try:
+                build_table(region)
+                render_screenshot(region)
+                break
+            except Exception:
+                traceback.print_exc()
+                print(
+                    f"[{region}] 生成失敗 (試行 {attempt}/{MAX_BUILD_ATTEMPTS})",
+                    file=sys.stderr,
+                )
+                if attempt == MAX_BUILD_ATTEMPTS:
+                    failed.append(region)
     return failed
 
 
