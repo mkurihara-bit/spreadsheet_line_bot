@@ -279,8 +279,9 @@ def upload_to_gas():
     一致する地域だけを送信対象にする。生成に失敗した地域は前回の画像が
     残っていても target_date が古いままなので自動的に除外される。
     """
-    url = os.environ["GAS_WEBAPP_URL"]
-    token = os.environ["GAS_TOKEN"]
+    # Secret登録時に紛れ込みがちな末尾の改行・空白を除去（誤URL/誤トークン防止）
+    url = os.environ["GAS_WEBAPP_URL"].strip()
+    token = os.environ["GAS_TOKEN"].strip()
     target = tomorrow_jst()
 
     images = []
