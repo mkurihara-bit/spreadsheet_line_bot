@@ -244,8 +244,18 @@ def build_html(sheet_title, target_date, rows):
         f"<tr><th>氏名</th><th>{header_date}</th></tr>",
     ]
     for name_cell, date_cell in rows:
-        name_text = (name_cell or {}).get("formattedValue", "") or ""
         date_text = (date_cell or {}).get("formattedValue", "") or ""
+        # 氏名欄が空の行(「店長代理」「九州工藤店舗」などの区切り見出し)は、
+        # 空白セルを並べず氏名列＋シフト列をまたいだ1本の見出し帯として表示する。
+        if name_cell is None:
+            lines.append(
+                "<tr>"
+                f"<td colspan='2' style='{cell_style(date_cell)}'>"
+                f"{html.escape(date_text)}</td>"
+                "</tr>"
+            )
+            continue
+        name_text = name_cell.get("formattedValue", "") or ""
         lines.append(
             "<tr>"
             f"<td style='{cell_style(name_cell)}'>{html.escape(name_text)}</td>"
