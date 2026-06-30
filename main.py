@@ -176,7 +176,15 @@ def fetch_sheets(spreadsheet_id):
 # 週次ロスター表のタブ名に共通して含まれる文字。「マスタ」「原本」「シフト作成
 # 成績表」「2026年7月」など、同じ翌日日付を含むが氏名×シフトの表ではないタブを
 # 誤って先に拾わないよう、まずこの文字を含むタブ(週次ロスター表)を優先して探す。
+# 関東の週次タブ「週_6月29日-7月5日」が該当。
 ROSTER_TITLE_HINT = "週"
+
+# 「2026年7月」「2025年　7月」のような月間タブ。週次ロスター表と同じ翌日日付を
+# 先頭に持つが氏名×シフトの表ではないため、全地域で走査対象から除外する。
+# 関西は週次タブが「6/29〜7/5」(「週」を含まない)のため ROSTER_TITLE_HINT では
+# 絞り込めず、月間タブ「2026年7月」を先に拾ってしまうのを防ぐ。
+# 半角/全角スペース混在(例「2025年　7月」)にも対応。
+MONTHLY_TITLE_RE = re.compile(r"\s*\d{4}\s*年\s*\d{1,2}\s*月")
 
 
 def find_target(sheets, target_date, skip_title_substr=None, prefer_substr=ROSTER_TITLE_HINT):
@@ -195,6 +203,9 @@ def find_target(sheets, target_date, skip_title_substr=None, prefer_substr=ROSTE
         for si, sheet in enumerate(sheets):
             title = sheet.get("properties", {}).get("title", "") or ""
             if skip_title_substr and skip_title_substr in title:
+                continue
+            # 月間タブ(「2026年7月」等)は週次ロスター表ではないので常に除外
+            if MONTHLY_TITLE_RE.match(title):
                 continue
             if only_prefer and prefer_substr and prefer_substr not in title:
                 continue
