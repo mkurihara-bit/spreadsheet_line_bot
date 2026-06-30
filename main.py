@@ -173,26 +173,47 @@ def fetch_sheets(spreadsheet_id):
     return resp.json()
 
 
-def find_target(sheets, target_date, skip_title_substr=None):
+# 週次ロスター表のタブ名に共通して含まれる文字。「マスタ」「原本」「シフト作成
+# 成績表」「2026年7月」など、同じ翌日日付を含むが氏名×シフトの表ではないタブを
+# 誤って先に拾わないよう、まずこの文字を含むタブ(週次ロスター表)を優先して探す。
+ROSTER_TITLE_HINT = "週"
+
+
+def find_target(sheets, target_date, skip_title_substr=None, prefer_substr=ROSTER_TITLE_HINT):
     """翌日日付を含む (sheet_index, header_row_index, col_index) を返す。
 
     skip_title_substr: タブ名にこの文字列を含むシートは走査対象から除外する。
         関東の「アクア」タブのように、同一スプレッドシート内の別チーム用タブを
         誤って拾わないために使う。
+    prefer_substr: まずタブ名にこの文字列を含むタブ(週次ロスター表)だけを探し、
+        見つかればそれを返す。見つからなければ全タブにフォールバックする。
+        マスタ/原本/月間集計タブが週次表より前(左)にあり、同じ日付を含むために
+        先に拾われてしまう問題を防ぐための絞り込み。
     """
-    for si, sheet in enumerate(sheets):
-        title = sheet.get("properties", {}).get("title", "") or ""
-        if skip_title_substr and skip_title_substr in title:
-            continue
-        data_arr = sheet.get("data") or []
-        if not data_arr:
-            continue
-        row_data = data_arr[0].get("rowData") or []
-        for ri in range(min(HEADER_SCAN_ROWS, len(row_data))):
-            for ci, cell in enumerate(row_data[ri].get("values", []) or []):
-                if cell_matches_date(cell, target_date):
-                    return si, ri, ci
-    return None
+
+    def scan(only_prefer):
+        for si, sheet in enumerate(sheets):
+            title = sheet.get("properties", {}).get("title", "") or ""
+            if skip_title_substr and skip_title_substr in title:
+                continue
+            if only_prefer and prefer_substr and prefer_substr not in title:
+                continue
+            data_arr = sheet.get("data") or []
+            if not data_arr:
+                continue
+            row_data = data_arr[0].get("rowData") or []
+            for ri in range(min(HEADER_SCAN_ROWS, len(row_data))):
+                for ci, cell in enumerate(row_data[ri].get("values", []) or []):
+                    if cell_matches_date(cell, target_date):
+                        return si, ri, ci
+        return None
+
+    # まず週次ロスター表タブだけを探し、無ければ従来どおり全タブを探す。
+    if prefer_substr:
+        hit = scan(only_prefer=True)
+        if hit is not None:
+            return hit
+    return scan(only_prefer=False)
 
 
 # ------------------------- HTML 生成 -------------------------
