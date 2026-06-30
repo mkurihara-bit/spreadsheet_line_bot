@@ -30,9 +30,7 @@ import traceback
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import httplib2
 import requests
-from googleapiclient.discovery import build
 from playwright.sync_api import sync_playwright
 
 OUT_DIR = Path("screenshots")
@@ -97,16 +95,6 @@ def read_status(region):
         return {}
 
 
-# ------------------------- Sheets サービス -------------------------
-
-def build_sheets_service():
-    api_key = os.environ["GOOGLE_API_KEY"]
-    # 関東のような大きいシートは読み込みに50秒以上かかり、既定(約60秒)を
-    # 超えてタイムアウトすることがあるため、余裕をもって120秒に延長する。
-    http = httplib2.Http(timeout=120)
-    return build("sheets", "v4", developerKey=api_key, http=http, cache_discovery=False)
-
-
 # ------------------------- 日付ユーティリティ -------------------------
 
 def tomorrow_jst():
@@ -157,17 +145,32 @@ def cell_matches_date(cell, target):
 
 # ------------------------- Sheets API -------------------------
 
-def fetch_sheets(service, spreadsheet_id):
+SHEETS_ENDPOINT = "https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}"
+
+
+def fetch_sheets(spreadsheet_id):
+    """Sheets REST API を requests で直接取得する。
+
+    以前は google-api-python-client(内部で httplib2 を使用)経由だったが、
+    関東・関西のように書式情報が多く gzip がよく効くシートでは、解凍後が
+    圧縮前の100倍を超え httplib2 の解凍倍率上限(DecodeRatioError)で失敗した。
+    requests(urllib3) はこの倍率上限を持たないため、大きいシートでも安定して
+    取得できる。
+    """
+    api_key = os.environ["GOOGLE_API_KEY"]
     fields = (
         "sheets(properties(title),"
         "data(rowData(values(effectiveValue,formattedValue,"
         "effectiveFormat(backgroundColor,textFormat)))))"
     )
-    return service.spreadsheets().get(
-        spreadsheetId=spreadsheet_id,
-        includeGridData=True,
-        fields=fields,
-    ).execute()
+    # 関東のような大きいシートは取得に時間がかかるため、余裕をもって120秒待つ。
+    resp = requests.get(
+        SHEETS_ENDPOINT.format(spreadsheet_id=spreadsheet_id),
+        params={"includeGridData": "true", "fields": fields, "key": api_key},
+        timeout=120,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
 
 def find_target(sheets, target_date, skip_title_substr=None):
@@ -391,11 +394,10 @@ def build_table(region):
     config = REGIONS[region]
     terminator = config["terminator"]
 
-    service = build_sheets_service()
     spreadsheet_id = os.environ[config["spreadsheet_id_env"]]
     target = tomorrow_jst()
 
-    data = fetch_sheets(service, spreadsheet_id)
+    data = fetch_sheets(spreadsheet_id)
     sheets = data.get("sheets", [])
     found = find_target(sheets, target, skip_title_substr=terminator)
     if not found:
@@ -405,10 +407,16 @@ def build_table(region):
     sheet = sheets[si]
     title = sheet["properties"]["title"]
     row_data = sheet["data"][0].get("rowData", [])
+    # スプレッドシートで非表示にしている行を画像から除外するためのメタ情報
+    row_meta = sheet["data"][0].get("rowMetadata", [])
 
     rows = []
     member_started = False  # 最初の氏名行を見つけたら True (それ以前のメモ書きは無視)
-    for row in row_data[header_ri + 1:]:
+    for abs_ri in range(header_ri + 1, len(row_data)):
+        # 画面で非表示(行を隠す)にしている行は、見た目どおり画像にも含めない
+        if abs_ri < len(row_meta) and row_meta[abs_ri].get("hiddenByUser"):
+            continue
+        row = row_data[abs_ri]
         values = row.get("values", []) or []
         date_cell = values[ci] if ci < len(values) else None
         name_cell = find_name_cell_in_row(values, exclude_col=ci)
